@@ -1,0 +1,46 @@
+# One-shot Job that creates all required Kafka topics after the broker is ready.
+# Re-run manually after cluster recreation: kubectl delete job kafka-init -n oms && kubectl apply -f kafka-init-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-init
+  namespace: oms
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-kafka
+          image: confluentinc/cp-kafka:7.6.0
+          command:
+            - /bin/bash
+            - -c
+            - |
+              until kafka-broker-api-versions --bootstrap-server kafka-broker:9092 > /dev/null 2>&1; do
+                echo "Waiting for Kafka..."; sleep 5
+              done
+              echo "Kafka ready."
+      containers:
+        - name: create-topics
+          image: confluentinc/cp-kafka:7.6.0
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              BS=kafka-broker:9092
+              create() {
+                kafka-topics.sh --bootstrap-server $BS \
+                  --create --if-not-exists \
+                  --topic "$1" --partitions "$2" --replication-factor 1
+                echo "Created: $1"
+              }
+              create orders.new            3
+              create orders.validated      3
+              create orders.rejected       1
+              create orders.cancel         3
+              create executions.fills      3
+              create executions.reports    3
+              create market.data.updates   3
+              echo "All topics created."

@@ -1,0 +1,44 @@
+# AWS Application Load Balancer Ingress
+# Requires: AWS Load Balancer Controller installed in the cluster
+#   https://kubernetes-sigs.github.io/aws-load-balancer-controller/
+#
+# Route map:
+#   /api/*  → order-service:8001  (strips /api prefix via nginx in the UI service)
+#   /*      → ui:80               (React SPA)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oms-ingress
+  namespace: oms
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    # Replace with your ACM certificate ARN
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:REGION:ACCOUNT_ID:certificate/CERT_ID"
+    alb.ingress.kubernetes.io/healthcheck-path: "/health"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/success-codes: "200"
+spec:
+  rules:
+    - http:
+        paths:
+          # API traffic — routed directly to order-service
+          # The UI nginx also proxies /api, but ALB direct routing is more efficient
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: order-service
+                port:
+                  number: 8001
+          # Everything else — served by the React SPA
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ui
+                port:
+                  number: 80

@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matching-engine
+  namespace: oms
+  labels:
+    app: matching-engine
+spec:
+  # Single replica: order book is in-memory. Horizontal scaling requires
+  # symbol-partitioned Kafka consumers + per-symbol sharding (future work).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: matching-engine
+  template:
+    metadata:
+      labels:
+        app: matching-engine
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+    spec:
+      serviceAccountName: oms-sa
+      containers:
+        - name: matching-engine
+          image: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/oms/matching-engine:TAG
+          imagePullPolicy: Always
+          ports:
+            - name: metrics
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: oms-config
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true

@@ -1,0 +1,286 @@
+version: "3.9"
+
+x-common-env: &common-env
+  KAFKA_BOOTSTRAP: kafka:9092
+  REDIS_URL: redis://redis:6379/0
+  DATABASE_URL: postgresql://${POSTGRES_USER:-oms}:${POSTGRES_PASSWORD:-oms_secret}@postgres:5432/${POSTGRES_DB:-oms}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+  METRICS_PORT: "8000"
+  PRICE_COLLAR_PCT: "0.10"
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks:
+    - oms_network
+  depends_on:
+    kafka:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+networks:
+  oms_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  grafana_data:
+  loki_data:
+  kafka_data:
+  zookeeper_data:
+
+services:
+  # ─────────────────────────────────────────
+  # Infrastructure
+  # ─────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    networks:
+      - oms_network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_HOURS: 24
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "9092:9092"
+    networks:
+      - oms_network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - oms_network
+    volumes:
+      - ./infra/kafka/create_topics.sh:/create_topics.sh
+    entrypoint: ["/bin/bash", "/create_topics.sh"]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-oms}
+      POSTGRES_USER: ${POSTGRES_USER:-oms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-oms_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - oms_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-oms}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - oms_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # OMS Core Services
+  # ─────────────────────────────────────────
+  risk-engine:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: services/risk-engine/Dockerfile
+    environment:
+      <<: *common-env
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  matching-engine:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: services/matching-engine/Dockerfile
+    environment:
+      <<: *common-env
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+  order-service:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    environment:
+      <<: *common-env
+    ports:
+      - "8001:8001"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────
+  # FIX Layer
+  # ─────────────────────────────────────────
+  fix-gateway:
+    <<: *service-defaults
+    platform: linux/amd64   # quickfix 1.15.1 contains x86-only atomic assembly
+    build:
+      context: .
+      dockerfile: services/fix-gateway/Dockerfile
+    environment:
+      <<: *common-env
+      FIX_CONFIG: /app/config/fix44.cfg
+    ports:
+      - "9876:9876"
+      - "8002:8000"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+  market-data-service:
+    <<: *service-defaults
+    platform: linux/amd64   # quickfix 1.15.1 contains x86-only atomic assembly
+    build:
+      context: .
+      dockerfile: services/market-data-service/Dockerfile
+    environment:
+      <<: *common-env
+      FIX_MD_CONFIG: /app/config/fix44_md.cfg
+    ports:
+      - "9877:9877"
+      - "8003:8000"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+  # ─────────────────────────────────────────
+  # Observability
+  # ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.49.1
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    ports:
+      - "9090:9090"
+    networks:
+      - oms_network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.3.1
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      GF_INSTALL_PLUGINS: grafana-clock-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - oms_network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+  loki:
+    image: grafana/loki:2.9.4
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./infra/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - oms_network
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:2.9.4
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./infra/loki/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - oms_network
+    restart: unless-stopped
+    depends_on:
+      - loki
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.54
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    networks:
+      - oms_network
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # OMS Web UI
+  # ─────────────────────────────────────────
+  ui:
+    build:
+      context: .
+      dockerfile: services/ui/Dockerfile
+    ports:
+      - "3001:80"
+    depends_on:
+      - order-service
+    networks:
+      - oms_network
+    restart: unless-stopped

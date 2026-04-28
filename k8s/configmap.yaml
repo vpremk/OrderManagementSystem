@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oms-config
+  namespace: oms
+data:
+  # Kafka — points to in-cluster broker; replace with MSK endpoint for production
+  KAFKA_BOOTSTRAP: "kafka-broker:9092"
+
+  # Redis — points to in-cluster Redis; replace with ElastiCache endpoint for production
+  REDIS_URL: "redis://redis:6379/0"
+
+  # Observability
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4317"
+  METRICS_PORT: "8000"
+
+  # Risk parameters
+  PRICE_COLLAR_PCT: "0.10"
+
+  # FIX config paths (mounted inside containers)
+  FIX_CONFIG: "/app/config/fix44.cfg"
+  FIX_MD_CONFIG: "/app/config/fix44_md.cfg"

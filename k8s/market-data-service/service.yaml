@@ -1,0 +1,37 @@
+# ClusterIP for internal metrics access
+apiVersion: v1
+kind: Service
+metadata:
+  name: market-data-service
+  namespace: oms
+  labels:
+    app: market-data-service
+spec:
+  selector:
+    app: market-data-service
+  ports:
+    - name: metrics
+      port: 8000
+      targetPort: 8000
+---
+# NLB for external FIX market data client connections (TCP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: market-data-service-nlb
+  namespace: oms
+  labels:
+    app: market-data-service
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+spec:
+  type: LoadBalancer
+  selector:
+    app: market-data-service
+  ports:
+    - name: fix-md
+      port: 9877
+      targetPort: 9877
+      protocol: TCP

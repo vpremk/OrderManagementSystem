@@ -1,0 +1,250 @@
+# Exchange OMS
+
+A containerised Exchange Order Management System built with Python, FIX 4.4, Apache Kafka, and Docker. Includes a React web UI for full order CRUD.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Browser (React UI)                    │
+│                        localhost:3001                        │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ HTTP /api/*  (nginx proxy)
+                           ▼
+Client (FIX 4.4)     ┌──────────────┐
+      │ TCP 9876      │ Order Service│◄─── orders.validated ──────────┐
+      ▼               │  (FastAPI +  │◄─── executions.fills ──────────┤
+┌─────────────┐       │  PostgreSQL) │──── executions.reports ───┐    │
+│ FIX Gateway │       └──────────────┘                           │    │
+│ (QuickFIX)  │─── orders.new ──►┌──────────────┐               │    │
+└─────────────┘                  │ Risk Engine  │── orders.validated ─►│
+      ▲                          │              │── orders.rejected ──►│
+      │ executions.reports       └──────────────┘               │    │
+      └──────────────────────────────────────────────────────────┘    │
+                                                                       │
+                                                              ┌─────────────────┐
+                                                              │ Matching Engine │
+                                                              │  (Order Book)   │
+                                                              └────────┬────────┘
+                                                                       │ market.data.updates
+                                                                       ▼
+                                                              ┌──────────────────┐
+Client (FIX 4.4) ◄── 35=W/X ────────────────────────────────│ Market Data Svc  │
+                             TCP 9877                         └──────────────────┘
+```
+
+## Services
+
+| Service | Role | Port |
+|---|---|---|
+| `ui` | React + Vite SPA; nginx proxies `/api/*` to order-service | **3001** |
+| `fix-gateway` | QuickFIX/Python FIX 4.4 acceptor; translates FIX messages to/from Kafka | 9876 |
+| `order-service` | Order lifecycle management, PostgreSQL persistence, REST API | 8001 |
+| `matching-engine` | In-memory price-time priority order book | — |
+| `risk-engine` | Pre-trade risk checks: position limits, order size, price collars | — |
+| `market-data-service` | Publishes FIX 35=W/X order book snapshots to subscribed clients | 9877 |
+
+## Infrastructure
+
+| Service | Purpose | Port |
+|---|---|---|
+| Kafka | Event bus for all inter-service messaging | 9092 |
+| PostgreSQL | Persistent storage for orders, executions, positions | 5432 |
+| Redis | Position cache for risk engine; FIX session state | 6379 |
+| Prometheus | Metrics scraping | 9090 |
+| Grafana | Dashboards (auto-provisioned) | 3000 |
+| Loki + Promtail | Log aggregation | 3100 |
+| Jaeger | Distributed tracing | 16686 |
+
+## Kafka Topics
+
+| Topic | Producer | Consumer(s) |
+|---|---|---|
+| `orders.new` | fix-gateway, order-service (UI) | risk-engine |
+| `orders.validated` | risk-engine | matching-engine, order-service |
+| `orders.rejected` | risk-engine | order-service |
+| `orders.cancel` | order-service (UI) | matching-engine |
+| `executions.fills` | matching-engine | order-service |
+| `executions.reports` | order-service | fix-gateway |
+| `market.data.updates` | matching-engine | market-data-service |
+
+## FIX 4.4 Message Types
+
+| MsgType | Name | Direction |
+|---|---|---|
+| 35=D | NewOrderSingle | Client → Gateway |
+| 35=F | OrderCancelRequest | Client → Gateway |
+| 35=G | OrderCancelReplaceRequest | Client → Gateway |
+| 35=8 | ExecutionReport | Gateway → Client |
+| 35=9 | OrderCancelReject | Gateway → Client |
+| 35=V | MarketDataRequest | Client → Market Data Svc |
+| 35=W | MarketDataSnapshotFullRefresh | Market Data Svc → Client |
+| 35=X | MarketDataIncrementalRefresh | Market Data Svc → Client |
+
+## Quick Start
+
+**Prerequisites:** Docker 24+, Docker Compose v2
+
+```bash
+# 1. Clone and configure
+cp .env.example .env
+
+# 2. Build and start all 15 containers
+make up
+
+# 3. Verify services are healthy
+docker compose ps
+```
+
+Check the UIs:
+
+| UI | URL | Credentials |
+|---|---|---|
+| **OMS Web UI** | http://localhost:3001 | — |
+| Grafana dashboards | http://localhost:3000 | admin / admin |
+| Prometheus | http://localhost:9090 | — |
+| Jaeger tracing | http://localhost:16686 | — |
+| Order Service REST (Swagger) | http://localhost:8001/docs | — |
+
+## Web UI
+
+The React UI at **http://localhost:3001** provides full order lifecycle management directly in the browser, auto-refreshing every 3 seconds.
+
+### Pages
+
+| Page | Path | Features |
+|---|---|---|
+| Dashboard | `/dashboard` | Live stat cards (total / open / filled / rejected), positions summary, recent fills |
+| Orders | `/orders` | Filterable table by account, symbol, status; **New Order** form; **Cancel** button; expandable execution sub-rows per order |
+| Positions | `/positions` | Net quantity, avg cost, notional value per account/symbol; long/short count |
+| Executions | `/executions` | All fills with total volume, filterable by symbol and account |
+
+### Order flow from the UI
+
+Orders submitted via the form publish directly to `orders.new` (bypassing the FIX gateway) and follow the same full Kafka pipeline — risk check → matching → execution report → persisted in PostgreSQL.
+
+### Local development (without Docker)
+
+```bash
+# Start the order-service backend first, then:
+make ui-dev   # runs Vite dev server at localhost:5173
+              # proxies /api/* → localhost:8001 automatically
+```
+
+## Configuration
+
+All configuration is driven by environment variables in `.env`. Copy `.env.example` to get started:
+
+| Variable | Default | Description |
+|---|---|---|
+| `POSTGRES_PASSWORD` | `oms_secret` | PostgreSQL password |
+| `KAFKA_BOOTSTRAP` | `kafka:9092` | Kafka bootstrap address |
+| `REDIS_URL` | `redis://redis:6379/0` | Redis connection URL |
+| `PRICE_COLLAR_PCT` | `0.10` | Pre-trade price collar width (±10%) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://jaeger:4317` | Jaeger OTLP endpoint |
+| `GF_SECURITY_ADMIN_PASSWORD` | `admin` | Grafana admin password |
+
+FIX session configuration lives in:
+- `services/fix-gateway/src/config/fix44.cfg` — order entry gateway (port 9876)
+- `services/market-data-service/src/config/fix44_md.cfg` — market data feed (port 9877)
+
+Add new FIX client sessions by appending `[SESSION]` blocks with `TargetCompID` for each counterparty.
+
+Instruments and risk limits are seeded in `infra/postgres/init.sql` and `services/risk-engine/src/instruments.json`.
+
+## Testing
+
+```bash
+# Unit tests — order book matching logic
+make unit-test
+
+# Integration test — sends a FIX NewOrderSingle, expects ExecutionReports
+make test
+```
+
+The integration test (`tests/fix_client_simulator.py`) connects as a FIX initiator, sends a matching buy/sell pair, and asserts that ExecutionReport (35=8) messages are received.
+
+## REST API
+
+The order service exposes a full REST API at `http://localhost:8001` (Swagger UI at `/docs`):
+
+```bash
+# List orders (filters: ?account=X&symbol=Y&status=Z)
+curl http://localhost:8001/orders
+
+# Submit a new order (routes through Kafka → risk → matching)
+curl -X POST http://localhost:8001/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"account":"ACC1","symbol":"AAPL","side":"1","ord_type":"2","quantity":"100","price":"150.00"}'
+
+# Cancel an open order
+curl -X DELETE http://localhost:8001/orders/{order_id}
+
+# Executions for a specific order
+curl http://localhost:8001/orders/{order_id}/executions
+
+# All executions (filters: ?symbol=X&account=Y)
+curl http://localhost:8001/executions
+
+# Positions (filter: ?account=X)
+curl http://localhost:8001/positions
+
+# Health check
+curl http://localhost:8001/health
+```
+
+Side values: `"1"` = Buy, `"2"` = Sell  
+Order type values: `"1"` = Market, `"2"` = Limit
+
+## Project Layout
+
+```
+OMS/
+├── docker-compose.yml
+├── .env.example
+├── Makefile
+├── shared/                      # Shared Python package (oms_shared)
+│   └── oms_shared/
+│       ├── models.py            # Pydantic event models
+│       ├── kafka_utils.py       # Producer/consumer helpers
+│       └── telemetry.py         # OpenTelemetry + structlog + Prometheus setup
+├── services/
+│   ├── ui/                      # React + Vite SPA (nginx, port 3001)
+│   │   ├── src/
+│   │   │   ├── pages/           # Dashboard, Orders, Positions, Executions
+│   │   │   └── components/      # Navbar, NewOrderModal, StatusBadge, SideTag, StatCard
+│   │   ├── nginx.conf           # Proxy /api/* → order-service, SPA fallback
+│   │   └── Dockerfile           # node:20-alpine build → nginx:alpine
+│   ├── fix-gateway/             # FIX 4.4 acceptor + Kafka bridge
+│   ├── order-service/           # FastAPI + PostgreSQL + Kafka consumer
+│   ├── matching-engine/         # Price-time priority order book
+│   ├── risk-engine/             # Pre-trade risk checks
+│   └── market-data-service/     # FIX market data publisher
+├── infra/
+│   ├── postgres/init.sql        # Schema + seed instruments
+│   ├── kafka/create_topics.sh   # Topic provisioning (7 topics)
+│   ├── prometheus/              # Scrape config
+│   ├── grafana/                 # Auto-provisioned datasources + OMS dashboard
+│   ├── loki/                    # Log aggregation config
+│   └── jaeger/                  # Tracing (all-in-one)
+└── tests/
+    ├── test_matching_engine.py  # Unit tests for order book
+    └── fix_client_simulator.py  # FIX initiator integration test
+```
+
+## Observability
+
+Every service emits:
+
+- **Structured JSON logs** → stdout → Promtail → Loki (queryable in Grafana)
+- **Prometheus metrics** — `oms_orders_received_total`, `oms_orders_rejected_total`, `oms_fills_total`, `oms_order_latency_seconds`
+- **OpenTelemetry traces** → Jaeger (spans cross fix-gateway → risk-engine → matching-engine → order-service)
+
+The Grafana OMS dashboard is auto-provisioned at startup and shows order throughput, fill rate by symbol, p99 latency, and rejection breakdown.
+
+## Stopping
+
+```bash
+make down        # stop containers, preserve volumes
+make clean       # stop containers and delete all volumes
+```

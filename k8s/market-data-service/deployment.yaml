@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: market-data-service
+  namespace: oms
+  labels:
+    app: market-data-service
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: market-data-service
+  template:
+    metadata:
+      labels:
+        app: market-data-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+    spec:
+      serviceAccountName: oms-sa
+      # quickfix 1.15.1 contains x86-only atomic assembly — must run on amd64 nodes
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      containers:
+        - name: market-data-service
+          image: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/oms/market-data-service:TAG
+          imagePullPolicy: Always
+          ports:
+            - name: fix-md
+              containerPort: 9877
+              protocol: TCP
+            - name: metrics
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: oms-config
+          startupProbe:
+            tcpSocket:
+              port: 9877
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 9877
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket:
+              port: 9877
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false   # QuickFIX writes store/log files
+          volumeMounts:
+            - name: fix-store
+              mountPath: /tmp/fix
+      volumes:
+        - name: fix-store
+          emptyDir: {}

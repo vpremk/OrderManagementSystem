@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: fix-gateway
+    static_configs:
+      - targets: ["fix-gateway:8000"]
+
+  - job_name: order-service
+    static_configs:
+      - targets: ["order-service:8001"]
+    metrics_path: /metrics
+
+  - job_name: matching-engine
+    static_configs:
+      - targets: ["matching-engine:8000"]
+
+  - job_name: risk-engine
+    static_configs:
+      - targets: ["risk-engine:8000"]
+
+  - job_name: market-data-service
+    static_configs:
+      - targets: ["market-data-service:8000"]
+
+  - job_name: kafka
+    static_configs:
+      - targets: ["kafka-exporter:9308"]

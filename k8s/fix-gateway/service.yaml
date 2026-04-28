@@ -1,0 +1,37 @@
+# ClusterIP for internal Kafka/metrics access
+apiVersion: v1
+kind: Service
+metadata:
+  name: fix-gateway
+  namespace: oms
+  labels:
+    app: fix-gateway
+spec:
+  selector:
+    app: fix-gateway
+  ports:
+    - name: metrics
+      port: 8000
+      targetPort: 8000
+---
+# NLB for external FIX client connections (TCP, not HTTP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: fix-gateway-nlb
+  namespace: oms
+  labels:
+    app: fix-gateway
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+spec:
+  type: LoadBalancer
+  selector:
+    app: fix-gateway
+  ports:
+    - name: fix
+      port: 9876
+      targetPort: 9876
+      protocol: TCP

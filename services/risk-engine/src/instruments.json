@@ -1,0 +1,8 @@
+{
+  "AAPL":  {"max_order_size": "10000", "position_limit": "100000", "min_price": "0.01", "max_price": "99999.99"},
+  "MSFT":  {"max_order_size": "10000", "position_limit": "100000", "min_price": "0.01", "max_price": "99999.99"},
+  "GOOG":  {"max_order_size": "5000",  "position_limit": "50000",  "min_price": "0.01", "max_price": "99999.99"},
+  "TSLA":  {"max_order_size": "10000", "position_limit": "100000", "min_price": "0.01", "max_price": "99999.99"},
+  "AMZN":  {"max_order_size": "5000",  "position_limit": "50000",  "min_price": "0.01", "max_price": "99999.99"},
+  "NVDA":  {"max_order_size": "5000",  "position_limit": "50000",  "min_price": "0.01", "max_price": "99999.99"}
+}

@@ -1,0 +1,80 @@
+# In-cluster Kafka broker — DEV / STAGING only.
+# Production: use Amazon MSK. Update configmap.yaml KAFKA_BOOTSTRAP to MSK endpoint.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka-broker
+  namespace: oms
+  labels:
+    app: kafka-broker
+spec:
+  serviceName: kafka-broker
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-broker
+  template:
+    metadata:
+      labels:
+        app: kafka-broker
+    spec:
+      containers:
+        - name: kafka
+          image: confluentinc/cp-kafka:7.6.0
+          env:
+            - name: KAFKA_BROKER_ID
+              value: "1"
+            - name: KAFKA_ZOOKEEPER_CONNECT
+              value: "zookeeper:2181"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "PLAINTEXT:PLAINTEXT"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka-broker:9092"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "false"
+            - name: KAFKA_LOG_RETENTION_HOURS
+              value: "24"
+          ports:
+            - containerPort: 9092
+          readinessProbe:
+            exec:
+              command:
+                - kafka-broker-api-versions
+                - --bootstrap-server
+                - localhost:9092
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp2
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-broker
+  namespace: oms
+spec:
+  selector:
+    app: kafka-broker
+  clusterIP: None
+  ports:
+    - port: 9092
