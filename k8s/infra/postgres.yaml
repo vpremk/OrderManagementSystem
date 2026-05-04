@@ -1,0 +1,153 @@
+# In-cluster PostgreSQL — DEV / STAGING only.
+# Production: use Amazon RDS for PostgreSQL. Update secret.yaml DATABASE_URL to RDS endpoint.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: oms
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: oms-secret
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: oms-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: oms-secret
+                  key: POSTGRES_PASSWORD
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "oms"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "oms"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: init-sql
+          configMap:
+            name: postgres-init
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp2
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: oms
+spec:
+  selector:
+    app: postgres
+  clusterIP: None
+  ports:
+    - port: 5432
+---
+# ConfigMap holding the schema init script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: oms
+data:
+  init.sql: |
+    CREATE TABLE IF NOT EXISTS instruments (
+        symbol          VARCHAR(16) PRIMARY KEY,
+        lot_size        NUMERIC(20,8) NOT NULL DEFAULT 1,
+        tick_size       NUMERIC(20,8) NOT NULL DEFAULT 0.01,
+        min_price       NUMERIC(20,8) NOT NULL DEFAULT 0.01,
+        max_price       NUMERIC(20,8) NOT NULL DEFAULT 99999.99,
+        max_order_size  NUMERIC(20,8) NOT NULL DEFAULT 10000,
+        position_limit  NUMERIC(20,8) NOT NULL DEFAULT 100000
+    );
+    CREATE TABLE IF NOT EXISTS orders (
+        order_id    VARCHAR(36) PRIMARY KEY,
+        cl_ord_id   VARCHAR(64) NOT NULL,
+        account     VARCHAR(64) NOT NULL,
+        symbol      VARCHAR(16) NOT NULL REFERENCES instruments(symbol),
+        side        CHAR(1) NOT NULL,
+        ord_type    CHAR(1) NOT NULL,
+        quantity    NUMERIC(20,8) NOT NULL,
+        price       NUMERIC(20,8),
+        status      CHAR(1) NOT NULL DEFAULT 'A',
+        session_id  VARCHAR(128),
+        created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_orders_account ON orders(account);
+    CREATE INDEX IF NOT EXISTS idx_orders_symbol  ON orders(symbol);
+    CREATE INDEX IF NOT EXISTS idx_orders_status  ON orders(status);
+    CREATE TABLE IF NOT EXISTS executions (
+        exec_id     VARCHAR(36) PRIMARY KEY,
+        order_id    VARCHAR(36) NOT NULL REFERENCES orders(order_id),
+        exec_type   CHAR(1) NOT NULL,
+        last_qty    NUMERIC(20,8) NOT NULL,
+        last_px     NUMERIC(20,8) NOT NULL,
+        cum_qty     NUMERIC(20,8) NOT NULL,
+        avg_px      NUMERIC(20,8) NOT NULL,
+        leaves_qty  NUMERIC(20,8) NOT NULL,
+        created_at  TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_execs_order_id ON executions(order_id);
+    CREATE TABLE IF NOT EXISTS positions (
+        id          VARCHAR(36) PRIMARY KEY,
+        account     VARCHAR(64) NOT NULL,
+        symbol      VARCHAR(16) NOT NULL,
+        net_qty     NUMERIC(20,8) NOT NULL DEFAULT 0,
+        avg_cost    NUMERIC(20,8) NOT NULL DEFAULT 0,
+        updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+        UNIQUE(account, symbol)
+    );
+    INSERT INTO instruments (symbol, lot_size, tick_size, min_price, max_price, max_order_size, position_limit) VALUES
+        ('AAPL', 1, 0.01, 0.01, 99999.99, 10000, 100000),
+        ('MSFT', 1, 0.01, 0.01, 99999.99, 10000, 100000),
+        ('GOOG', 1, 0.01, 0.01, 99999.99,  5000,  50000),
+        ('TSLA', 1, 0.01, 0.01, 99999.99, 10000, 100000),
+        ('AMZN', 1, 0.01, 0.01, 99999.99,  5000,  50000),
+        ('NVDA', 1, 0.01, 0.01, 99999.99,  5000,  50000)
+    ON CONFLICT (symbol) DO NOTHING;

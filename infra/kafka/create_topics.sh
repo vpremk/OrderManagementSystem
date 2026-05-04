@@ -5,7 +5,7 @@ BOOTSTRAP=${KAFKA_BOOTSTRAP:-kafka:9092}
 
 wait_for_kafka() {
     echo "Waiting for Kafka at $BOOTSTRAP..."
-    until kafka-topics.sh --bootstrap-server "$BOOTSTRAP" --list > /dev/null 2>&1; do
+    until kafka-topics --bootstrap-server "$BOOTSTRAP" --list > /dev/null 2>&1; do
         sleep 2
     done
     echo "Kafka is ready."
@@ -15,7 +15,7 @@ create_topic() {
     local topic=$1
     local partitions=${2:-3}
     local replication=${3:-1}
-    kafka-topics.sh --bootstrap-server "$BOOTSTRAP" \
+    kafka-topics --bootstrap-server "$BOOTSTRAP" \
         --create --if-not-exists \
         --topic "$topic" \
         --partitions "$partitions" \

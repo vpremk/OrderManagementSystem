@@ -1,0 +1,45 @@
+# Apply all manifests with: kubectl apply -k k8s/
+# Apply infra only:        kubectl apply -f k8s/infra/
+# Apply app only:          kubectl apply -k k8s/ --prune -l app!=infra
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: oms
+
+resources:
+  # Cluster-level
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - serviceaccount.yaml
+
+  # In-cluster infra (omit for production — use MSK/RDS/ElastiCache instead)
+  - infra/zookeeper.yaml
+  - infra/kafka.yaml
+  - infra/kafka-init-job.yaml
+  - infra/postgres.yaml
+  - infra/redis.yaml
+
+  # Application services
+  - fix-gateway/deployment.yaml
+  - fix-gateway/service.yaml
+  - order-service/deployment.yaml
+  - order-service/service.yaml
+  - order-service/hpa.yaml
+  - matching-engine/deployment.yaml
+  - matching-engine/service.yaml
+  - risk-engine/deployment.yaml
+  - risk-engine/service.yaml
+  - risk-engine/hpa.yaml
+  - market-data-service/deployment.yaml
+  - market-data-service/service.yaml
+  - ui/deployment.yaml
+  - ui/service.yaml
+
+  # Ingress (ALB)
+  - ingress.yaml
+
+# Override images here instead of editing individual files:
+# images:
+#   - name: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/oms/fix-gateway
+#     newTag: v1.2.3

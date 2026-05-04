@@ -227,6 +227,24 @@ OMS/
 │   ├── grafana/                 # Auto-provisioned datasources + OMS dashboard
 │   ├── loki/                    # Log aggregation config
 │   └── jaeger/                  # Tracing (all-in-one)
+├── k8s/                         # Kubernetes manifests for EKS
+│   ├── kustomization.yaml       # Apply everything: kubectl apply -k k8s/
+│   ├── deploy.sh                # Build → push ECR → deploy script
+│   ├── namespace.yaml
+│   ├── configmap.yaml
+│   ├── secret.yaml              # Template — fill in real values
+│   ├── serviceaccount.yaml      # IRSA service account
+│   ├── ingress.yaml             # ALB Ingress (UI + API)
+│   ├── {fix-gateway,order-service,matching-engine,risk-engine,market-data-service,ui}/
+│   │   ├── deployment.yaml
+│   │   ├── service.yaml
+│   │   └── hpa.yaml             # order-service and risk-engine only
+│   └── infra/                   # In-cluster infra (dev/staging only)
+│       ├── zookeeper.yaml
+│       ├── kafka.yaml
+│       ├── kafka-init-job.yaml
+│       ├── postgres.yaml
+│       └── redis.yaml
 └── tests/
     ├── test_matching_engine.py  # Unit tests for order book
     └── fix_client_simulator.py  # FIX initiator integration test
@@ -242,9 +260,113 @@ Every service emits:
 
 The Grafana OMS dashboard is auto-provisioned at startup and shows order throughput, fill rate by symbol, p99 latency, and rejection breakdown.
 
+## Kubernetes / EKS
+
+### Prerequisites
+
+| Tool | Purpose |
+|---|---|
+| `kubectl` | Cluster interaction |
+| `aws` CLI | ECR login, kubeconfig update |
+| `docker buildx` | Multi-arch image builds |
+| [AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/) | ALB Ingress + NLB Services |
+| EBS CSI driver | `gp2` PersistentVolumeClaims for in-cluster infra |
+
+### Architecture on EKS
+
+```
+Internet
+   │
+   ├── NLB (TCP 9876) ──► fix-gateway pod          (amd64 node)
+   ├── NLB (TCP 9877) ──► market-data-service pod   (amd64 node)
+   └── ALB (HTTPS 443)
+         ├── /api/* ──► order-service pods   (2–10 replicas, HPA)
+         └── /*     ──► ui pods              (2 replicas)
+
+ Internal (ClusterIP)
+   ├── matching-engine  (1 replica — stateful in-memory order book)
+   ├── risk-engine      (2–6 replicas, HPA)
+   ├── kafka-broker     StatefulSet + 20 Gi EBS  [dev/staging only]
+   ├── postgres         StatefulSet + 20 Gi EBS  [dev/staging only]
+   └── redis            StatefulSet +  5 Gi EBS  [dev/staging only]
+```
+
+**Production managed services** — replace in-cluster infra with:
+- Kafka → **Amazon MSK** (update `KAFKA_BOOTSTRAP` in `k8s/configmap.yaml`)
+- PostgreSQL → **Amazon RDS** (update `DATABASE_URL` in `k8s/secret.yaml`)
+- Redis → **Amazon ElastiCache** (update `REDIS_URL` in `k8s/configmap.yaml`)
+
+### Quickstart
+
+```bash
+export AWS_ACCOUNT_ID=123456789012
+export AWS_REGION=us-east-1
+export CLUSTER_NAME=oms-eks
+export IMAGE_TAG=v1.0.0
+
+# 1. Fill in real values (passwords, RDS/MSK/ElastiCache endpoints, cert ARN)
+vi k8s/secret.yaml
+vi k8s/configmap.yaml
+vi k8s/ingress.yaml       # set alb.ingress.kubernetes.io/certificate-arn
+
+# 2. Deploy in-cluster infra (skip for production — use MSK/RDS/ElastiCache)
+./k8s/deploy.sh --infra
+
+# 3. Build images, push to ECR, deploy app
+./k8s/deploy.sh --app
+
+# Or do everything at once
+./k8s/deploy.sh --all
+```
+
+### Node group requirements
+
+| Node arch | Used by |
+|---|---|
+| `amd64` | fix-gateway, market-data-service (quickfix x86 assembly) |
+| `amd64` or `arm64` | order-service, matching-engine, risk-engine, ui |
+
+### Useful kubectl commands
+
+```bash
+# Watch all OMS pods
+kubectl get pods -n oms -w
+
+# Tail logs for a service
+kubectl logs -n oms -l app=order-service -f
+
+# Check HPA status
+kubectl get hpa -n oms
+
+# Get ALB DNS name (UI + API)
+kubectl get ingress oms-ingress -n oms
+
+# Get NLB DNS name (FIX order entry)
+kubectl get svc fix-gateway-nlb -n oms
+```
+
+### Applying manifests manually
+
+```bash
+# Apply everything (namespace → infra → app → ingress)
+kubectl apply -k k8s/
+
+# Apply app only (after infra is up and MSK/RDS endpoints are set)
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/configmap.yaml
+kubectl apply -f k8s/secret.yaml
+for svc in fix-gateway order-service matching-engine risk-engine market-data-service ui; do
+  kubectl apply -f k8s/$svc/
+done
+kubectl apply -f k8s/ingress.yaml
+```
+
 ## Stopping
 
 ```bash
-make down        # stop containers, preserve volumes
-make clean       # stop containers and delete all volumes
+make down        # stop Docker containers, preserve volumes
+make clean       # stop Docker containers and delete all volumes
+
+# Tear down EKS deployment
+kubectl delete namespace oms
 ```
