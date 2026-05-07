@@ -2,9 +2,9 @@ from __future__ import annotations
 from decimal import Decimal
 from confluent_kafka import Producer
 from oms_shared.models import (
-    OrderValidatedEvent, FillEvent, MarketDataUpdate, ExecType, Side,
+    OrderValidatedEvent, FillEvent, MarketDataUpdate, TradeEvent, ExecType, Side,
 )
-from oms_shared.kafka_utils import publish, TOPIC_EXECUTIONS_FILLS, TOPIC_MARKET_DATA_UPDATES
+from oms_shared.kafka_utils import publish, TOPIC_EXECUTIONS_FILLS, TOPIC_MARKET_DATA_UPDATES, TOPIC_TRADES
 from oms_shared.telemetry import fills_total
 from order_book import Fill
 import structlog
@@ -58,6 +58,31 @@ def publish_fills(producer: Producer, fills: list[Fill], original: OrderValidate
             session_id=fill.maker_session_id,
         )
         publish(producer, TOPIC_EXECUTIONS_FILLS, maker_fill.order_id, maker_fill)
+
+        # Publish trade event for settlement
+        if fill.side == Side.BUY:
+            buy_account, sell_account = fill.taker_account, fill.maker_account
+            buy_order_id, sell_order_id = fill.taker_order_id, fill.maker_order_id
+            buy_exec_id, sell_exec_id = taker_fill.exec_id, maker_fill.exec_id
+        else:
+            buy_account, sell_account = fill.maker_account, fill.taker_account
+            buy_order_id, sell_order_id = fill.maker_order_id, fill.taker_order_id
+            buy_exec_id, sell_exec_id = maker_fill.exec_id, taker_fill.exec_id
+
+        trade = TradeEvent(
+            trade_id=fill.exec_id,
+            buy_order_id=buy_order_id,
+            sell_order_id=sell_order_id,
+            buy_exec_id=buy_exec_id,
+            sell_exec_id=sell_exec_id,
+            buy_account=buy_account,
+            sell_account=sell_account,
+            symbol=fill.symbol,
+            quantity=fill.quantity,
+            price=fill.price,
+            notional=fill.quantity * fill.price,
+        )
+        publish(producer, TOPIC_TRADES, trade.trade_id, trade)
 
         fills_total.labels(symbol=fill.symbol, side=fill.side.value).inc()
         log.info("matching.fill", symbol=fill.symbol, price=str(fill.price), qty=str(fill.quantity))

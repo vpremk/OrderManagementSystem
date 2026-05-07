@@ -92,6 +92,24 @@ class ExecutionReportEvent(FillEvent):
     ord_status: OrdStatus
 
 
+class TradeEvent(BaseModel):
+    trade_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    buy_order_id: str
+    sell_order_id: str
+    buy_exec_id: str
+    sell_exec_id: str
+    buy_account: str
+    sell_account: str
+    symbol: str
+    quantity: Decimal
+    price: Decimal
+    notional: Decimal
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        json_encoders = {Decimal: str, datetime: lambda v: v.isoformat()}
+
+
 class MarketDataUpdate(BaseModel):
     symbol: str
     bids: list[tuple[str, str]]  # [(price, qty), ...]

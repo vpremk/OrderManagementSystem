@@ -272,6 +272,31 @@ services:
     restart: unless-stopped
 
   # ─────────────────────────────────────────
+  # Settlement (T+0, Circle USDC)
+  # ─────────────────────────────────────────
+  settlement:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: services/settlement/Dockerfile
+    environment:
+      <<: *common-env
+      CIRCLE_API_KEY: ${CIRCLE_API_KEY:-}
+      CIRCLE_BASE_URL: ${CIRCLE_BASE_URL:-https://api.circle.com}
+      CIRCLE_ENTITY_SECRET_HEX: ${CIRCLE_ENTITY_SECRET_HEX:-}   # 64 hex chars (32 bytes)
+      CIRCLE_PUBLIC_KEY: ${CIRCLE_PUBLIC_KEY:-}                  # optional; fetched from API if blank
+      CIRCLE_BLOCKCHAIN: ${CIRCLE_BLOCKCHAIN:-ETH-SEPOLIA}
+      CIRCLE_FEE_LEVEL: ${CIRCLE_FEE_LEVEL:-MEDIUM}
+      CIRCLE_MOCK: ${CIRCLE_MOCK:-true}
+    ports:
+      - "8004:8004"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────
   # OMS Web UI
   # ─────────────────────────────────────────
   ui:

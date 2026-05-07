@@ -16,6 +16,7 @@ TOPIC_ORDERS_CANCEL = "orders.cancel"
 TOPIC_EXECUTIONS_FILLS = "executions.fills"
 TOPIC_EXECUTIONS_REPORTS = "executions.reports"
 TOPIC_MARKET_DATA_UPDATES = "market.data.updates"
+TOPIC_TRADES = "trades"
 
 
 def make_producer() -> Producer:

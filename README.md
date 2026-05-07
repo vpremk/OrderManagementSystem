@@ -2,6 +2,110 @@
 
 A containerised Exchange Order Management System built with Python, FIX 4.4, Apache Kafka, and Docker. Includes a React web UI for full order CRUD.
 
+## DeFi Settlement — Circle T+0
+
+Every matched trade triggers an instant on-chain USDC settlement via Circle's
+**Programmable Wallets (W3S)** API. Each OMS account maps to a Circle-managed
+**ERC-4337 Smart Contract Account (MSCA)** on Ethereum Sepolia (or any
+Circle-supported chain). The entity secret is never transmitted in plaintext —
+it is RSA-OAEP encrypted client-side before each API call.
+
+```
+  OMS Pipeline            Settlement Service          Circle W3S API            Ethereum Sepolia
+  ─────────────────────   ──────────────────────────  ────────────────────────  ─────────────────
+  Matching Engine
+  buy + sell cross
+        │
+  TradeEvent ────────────►consume trades topic
+  (Kafka: trades)
+
+                          ── ① Wallet Setup ─────────────────────────────────── (first use only)
+                          GET publicKey ─────────────►/config/entity/publicKey
+                         ◄───────────────────────────RSA-2048 PEM
+
+                          encrypt(entitySecret,       ← generated fresh each
+                            pubKey, OAEP+SHA256)         call; OAEP is non-
+                            → ciphertext                 deterministic
+
+                          POST walletSets ────────────►/developer/walletSets
+                         ◄───────────────────────────  walletSetId
+
+                          POST wallets (×2) ──────────►/developer/wallets
+                         ◄───────────────────────────  walletId  + 0x address
+                          buyer SCA / seller SCA       (ERC-4337 MSCA)
+
+                          ── ② Gas Gate ─────────────────────────────────────────────────────────
+                          GET balances ───────────────►/wallets/{id}/balances
+                         ◄───────────────────────────  tokenBalances[]
+                          ✗ no native token → FAILED   buyer must hold ETH for gas
+
+                          ── ③ Initiate Transfer ────────────────────────────────────────────────
+                          POST transfer ──────────────►/developer/transactions/transfer
+                            walletId (buyer)             entitySecretCiphertext (fresh)
+                            destinationAddress (seller)  amounts, feeLevel, blockchain
+                         ◄───────────────────────────  { id, state: INITIATED }
+                                                                  │
+                                                           sign & broadcast ──────────► ERC-4337
+                                                           UserOperation                UserOp on-chain
+
+                          ── ④ Poll Status (every 5 s, up to 2 min) ────────────────────────────
+                          GET transaction ────────────►/transactions/{id}
+                         ◄───────────────────────────  INITIATED
+                         ◄───────────────────────────  SENT
+                         ◄───────────────────────────  CONFIRMED  ◄──────────────── block mined
+                         ◄───────────────────────────  COMPLETE
+                            txHash + blockHeight
+                            network_fee stored
+
+                          status → SETTLED ✓
+                          (postgres: settlements)
+```
+
+### Wallet Ownership Transfer (optional exit path)
+
+Circle holds custody of each MSCA by default. Ownership can be moved to an
+external EOA at any time — after which Circle loses signing authority and the
+EOA transacts directly on-chain.
+
+```
+  REST Client             Settlement Service          Circle W3S API            Ethereum Sepolia
+  ─────────────────────   ──────────────────────────  ────────────────────────  ─────────────────
+
+  POST /wallets/{account}
+  /transfer-ownership
+  { new_owner_address } ─►POST contractExecution ────►/developer/transactions/contractExecution
+                            walletId (MSCA)              abiFunctionSignature:
+                            contractAddress (MSCA)         transferNativeOwnership(address)
+                            entitySecretCiphertext         abiParameters: [EOA address]
+                         ◄───────────────────────────  { id, state: INITIATED }
+                                                                  │
+                                                           call contract ─────────────────────► MSCA
+  202 { circle_tx_id } ◄─                                                                       transferNativeOwnership
+                                                                                                (EOA confirmed)
+
+  ✗ Any further Circle-signed transaction now returns:
+    HTTP 400 · code 155512 · "SCA wallet without owner wallet"
+```
+
+| Settlement status | Meaning |
+|---|---|
+| `PENDING` | TradeEvent received, wallets being provisioned |
+| `PROCESSING` | Circle transfer initiated, waiting for on-chain confirmation |
+| `SETTLED` | Transaction `COMPLETE` on-chain; `tx_hash` + `block_height` recorded |
+| `FAILED` | Gas gate failed, Circle rejected transfer, or polling timed out |
+
+**Swagger UI:** `http://localhost:8004/docs`
+
+| Endpoint | Description |
+|---|---|
+| `GET /settlements` | All settlements (filter by `status`, `symbol`) |
+| `GET /settlements/{id}` | Single settlement with on-chain details |
+| `GET /wallets` | All provisioned Circle SCA wallets and addresses |
+| `GET /wallets/{account}/balances` | On-chain token balances |
+| `POST /wallets/{account}/transfer-ownership` | Hand MSCA custody to external EOA |
+
+---
+
 ## Architecture
 
 ```

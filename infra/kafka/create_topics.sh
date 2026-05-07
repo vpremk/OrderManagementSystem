@@ -32,5 +32,6 @@ create_topic "orders.cancel"          3 1
 create_topic "executions.fills"       3 1
 create_topic "executions.reports"     3 1
 create_topic "market.data.updates"    3 1
+create_topic "trades"                 3 1
 
 echo "All topics created."
