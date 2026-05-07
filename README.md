@@ -10,6 +10,81 @@ Every matched trade triggers an instant on-chain USDC settlement via Circle's
 Circle-supported chain). The entity secret is never transmitted in plaintext —
 it is RSA-OAEP encrypted client-side before each API call.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C  as Customer<br/>(Browser / FIX)
+    participant GW as Order Service &<br/>FIX Gateway
+    participant RE as Risk Engine
+    participant ME as Matching Engine
+    participant SS as Settlement Service
+    participant CI as Circle W3S API
+    participant BC as Ethereum Sepolia
+
+    rect rgb(219,234,254)
+        Note over C,BC: ① ACCOUNT SETUP  —  once per OMS account, before first trade
+        SS->>CI: GET /v1/w3s/config/entity/publicKey
+        CI-->>SS: RSA-2048 PEM
+        Note over SS: encrypt(entitySecret, pubKey)<br/>RSA-OAEP + SHA-256 → ciphertext<br/>(generated fresh for every API call)
+        SS->>CI: POST /v1/w3s/developer/walletSets
+        CI-->>SS: walletSetId
+        SS->>CI: POST /v1/w3s/developer/wallets  ×2  (buyer + seller)
+        CI-->>SS: walletId  +  0x address  (ERC-4337 MSCA)
+    end
+
+    rect rgb(254,243,199)
+        Note over C,BC: ② ORDER ENTRY
+        C->>GW: POST /orders  (REST UI)  or  FIX 35=D  NewOrderSingle  (TCP 9876)
+        GW->>RE: Kafka  →  orders.new
+    end
+
+    rect rgb(254,226,226)
+        Note over C,BC: ③ PRE-TRADE RISK CHECK
+        Note over RE: position limits · price collar ±10% · max order size
+        alt order rejected
+            RE-->>GW: Kafka  →  orders.rejected
+            GW-->>C: FIX 35=8  OrdStatus = REJECTED
+        else order validated
+            RE->>ME: Kafka  →  orders.validated
+        end
+    end
+
+    rect rgb(220,252,231)
+        Note over C,BC: ④ ORDER MATCHING  —  price-time priority book
+        ME->>GW: Kafka  →  executions.fills
+        GW->>C: FIX 35=8  OrdStatus = FILLED
+        ME->>SS: Kafka  →  trades  {buy_account, sell_account, symbol, qty, price, notional}
+    end
+
+    rect rgb(237,233,254)
+        Note over C,BC: ⑤ T+0 SETTLEMENT  —  triggered by every fill
+        SS->>CI: GET /v1/w3s/wallets/{buyerWalletId}/balances
+        CI-->>SS: tokenBalances[]
+        Note over SS: gas gate: buyer wallet must hold<br/>native token to cover ERC-4337 fees
+        SS->>CI: POST /v1/w3s/developer/transactions/transfer<br/>source=buyer wallet · destination=seller 0x address<br/>amount=notional · entitySecretCiphertext (fresh)
+        CI-->>SS: {id,  state: INITIATED}
+        CI->>BC: sign & broadcast ERC-4337 UserOperation
+        loop Poll every 5 s  ·  timeout 2 min
+            SS->>CI: GET /v1/w3s/transactions/{id}
+            CI-->>SS: INITIATED → SENT → CONFIRMED
+        end
+        BC-->>CI: block confirmed
+        CI-->>SS: state: COMPLETE  ·  txHash  ·  blockHeight  ·  networkFee
+        Note over SS: status = SETTLED<br/>txHash + blockHeight stored in postgres
+    end
+
+    rect rgb(254,252,232)
+        Note over C,BC: ⑥ CUSTODY EXIT  —  optional, customer moves MSCA to own EOA
+        C->>SS: POST /wallets/{account}/transfer-ownership<br/>{new_owner_address: 0xEOA}
+        SS->>CI: POST /v1/w3s/developer/transactions/contractExecution<br/>abiFunctionSignature: transferNativeOwnership(address)<br/>abiParameters: [EOA address]  ·  entitySecretCiphertext (fresh)
+        CI->>BC: broadcast ownership-transfer UserOp on MSCA contract
+        BC-->>CI: COMPLETE
+        CI-->>SS: state: COMPLETE
+        SS-->>C: HTTP 202  {circle_tx_id}
+        Note over BC: Circle loses custody permanently.<br/>EOA signs all future transactions directly.<br/>Re-transfer attempt → HTTP 400 code 155512.
+    end
+```
+
 ```
   OMS Pipeline            Settlement Service          Circle W3S API            Ethereum Sepolia
   ─────────────────────   ──────────────────────────  ────────────────────────  ─────────────────
